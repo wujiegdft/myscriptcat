@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name YouTube 快捷播放速度控制器
 // @namespace https://scriptcat.org/
-// @version 1.1.0
+// @version 1.1.1
 // @description 为 YouTube 播放器添加简洁倍速面板，支持 0.5x–2x 快捷切换及倍速记忆。
 // @author Antigravity
 // @match https://www.youtube.com/*
@@ -29,6 +29,7 @@
     let rememberSpeed = true;
     let currentSpeed = 1.0;
     let toastTimeout = null;
+    let hideTimer = null;
     let mountAttempt = 0;
     let lastMountFailReason = '';
 
@@ -82,19 +83,14 @@
                 justify-content: center;
             }
 
-            .yt-speed-btn-current:hover {
+            .yt-speed-btn-current:hover,
+            .yt-speed-control-wrapper.is-open .yt-speed-btn-current {
                 background: rgba(255, 255, 255, 0.1);
-            }
-
-            .yt-speed-btn-current:active {
-                background: rgba(255, 255, 255, 0.16);
             }
 
             .yt-speed-panel {
                 position: absolute;
-                bottom: 44px;
-                left: 50%;
-                transform: translateX(-50%) translateY(6px);
+                transform: translateX(-50%);
                 background: #212121;
                 border-radius: 12px;
                 padding: 6px;
@@ -104,17 +100,21 @@
                 opacity: 0;
                 visibility: hidden;
                 pointer-events: none;
-                transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s ease;
-                z-index: 9999;
+                z-index: 10000;
                 white-space: nowrap;
+                font-family: "YouTube Noto", Roboto, Arial, sans-serif;
             }
 
-            .yt-speed-control-wrapper:hover .yt-speed-panel,
             .yt-speed-panel.show {
                 opacity: 1;
                 visibility: visible;
                 pointer-events: auto;
-                transform: translateX(-50%) translateY(0);
+            }
+
+            .yt-speed-hover-bridge {
+                position: absolute;
+                pointer-events: auto;
+                z-index: 9999;
             }
 
             .yt-speed-preset-chip {
@@ -168,9 +168,10 @@
     };
 
     const getVideo = () => document.querySelector('video.html5-main-video') || document.querySelector('video');
+    const getPlayer = () => document.querySelector('#movie_player') || document.querySelector('.html5-video-player');
 
     const showToast = (speed) => {
-        const player = document.querySelector('.html5-video-player');
+        const player = getPlayer();
         if (!player) return;
 
         let toast = player.querySelector('.yt-speed-toast');
@@ -233,7 +234,7 @@
     };
 
     const getRightControls = () => {
-        const player = document.querySelector('#movie_player') || document.querySelector('.html5-video-player');
+        const player = getPlayer();
         const root = player || document;
         const candidates = [
             root.querySelector('.ytp-right-controls-right'),
@@ -254,12 +255,15 @@
                 if (existing.isConnected) return;
                 existing.remove();
             }
+            document.getElementById('yt-speed-panel')?.remove();
+            document.getElementById('yt-speed-hover-bridge')?.remove();
 
+            const player = getPlayer();
             const rightControls = getRightControls();
-            if (!rightControls) {
+            if (!player || !rightControls) {
                 if (lastMountFailReason !== 'no-right-controls' || attempt <= 5 || attempt % 10 === 0) {
                     lastMountFailReason = 'no-right-controls';
-                    WARN('未找到右侧控件容器，挂载失败', { attempt, probe: probePlayerDom() });
+                    WARN('未找到播放器控件，挂载失败', { attempt, probe: probePlayerDom() });
                 }
                 return;
             }
@@ -277,9 +281,15 @@
             btnText.className = 'yt-speed-btn-text';
             btnText.textContent = formatSpeed(currentSpeed);
             btn.appendChild(btnText);
+            wrapper.appendChild(btn);
 
             const panel = document.createElement('div');
+            panel.id = 'yt-speed-panel';
             panel.className = 'yt-speed-panel';
+
+            const bridge = document.createElement('div');
+            bridge.id = 'yt-speed-hover-bridge';
+            bridge.className = 'yt-speed-hover-bridge';
 
             PRESETS.forEach((s) => {
                 const chip = document.createElement('button');
@@ -291,12 +301,10 @@
                 chip.addEventListener('click', (e) => {
                     e.stopPropagation();
                     setSpeed(s);
+                    closePanel();
                 });
                 panel.appendChild(chip);
             });
-
-            wrapper.appendChild(btn);
-            wrapper.appendChild(panel);
 
             const settingsBtn = rightControls.querySelector('.ytp-settings-button');
             if (settingsBtn) {
@@ -304,6 +312,62 @@
             } else {
                 rightControls.insertBefore(wrapper, rightControls.firstChild);
             }
+
+            player.appendChild(panel);
+            player.appendChild(bridge);
+
+            const positionPanel = () => {
+                const playerRect = player.getBoundingClientRect();
+                const btnRect = btn.getBoundingClientRect();
+                const left = btnRect.left + btnRect.width / 2 - playerRect.left;
+                const bottom = playerRect.bottom - btnRect.top;
+                panel.style.left = `${left}px`;
+                panel.style.bottom = `${bottom}px`;
+                bridge.style.left = `${btnRect.left - playerRect.left}px`;
+                bridge.style.width = `${Math.max(btnRect.width, 48)}px`;
+                bridge.style.bottom = `${bottom}px`;
+                bridge.style.height = '16px';
+            };
+
+            const openPanel = () => {
+                clearTimeout(hideTimer);
+                wrapper.classList.add('is-open');
+                panel.classList.add('show');
+                bridge.style.display = 'block';
+                positionPanel();
+            };
+
+            const closePanel = () => {
+                clearTimeout(hideTimer);
+                wrapper.classList.remove('is-open');
+                panel.classList.remove('show');
+                bridge.style.display = 'none';
+            };
+
+            const scheduleClose = () => {
+                clearTimeout(hideTimer);
+                hideTimer = setTimeout(closePanel, 220);
+            };
+
+            bridge.style.display = 'none';
+
+            [wrapper, panel, bridge].forEach((el) => {
+                el.addEventListener('mouseenter', openPanel);
+                el.addEventListener('mouseleave', scheduleClose);
+            });
+
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (panel.classList.contains('show')) closePanel();
+                else openPanel();
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!wrapper.contains(e.target) && !panel.contains(e.target) && !bridge.contains(e.target)) {
+                    closePanel();
+                }
+            });
 
             wrapper.addEventListener('wheel', (e) => {
                 e.preventDefault();
@@ -360,6 +424,17 @@
 
         document.addEventListener('yt-navigate-finish', () => {
             setTimeout(tick, 300);
+        });
+
+        window.addEventListener('resize', () => {
+            const panel = document.getElementById('yt-speed-panel');
+            const btn = document.querySelector('.yt-speed-btn-current');
+            const player = getPlayer();
+            if (!panel || !btn || !player || !panel.classList.contains('show')) return;
+            const playerRect = player.getBoundingClientRect();
+            const btnRect = btn.getBoundingClientRect();
+            panel.style.left = `${btnRect.left + btnRect.width / 2 - playerRect.left}px`;
+            panel.style.bottom = `${playerRect.bottom - btnRect.top}px`;
         });
     };
 
